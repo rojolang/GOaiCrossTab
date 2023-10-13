@@ -194,19 +194,19 @@ go run main.go
 ```
 ####
 6. The application should now be running on your local machine.
+##
 
-## The Brains 👥
+<h1 align="center">Special thanks to:</h1>
+<h2 align="center">The Brains 👥</h2>
+<h3 align="center">
+<a href="https://github.com/gluebag">@gluebag</a>
+<a href="https://github.com/haitestucodes">@haitestucodes</a></h3>
 
-Special thanks to:
+<h3 align="center">:rocket: New developments @ <a href="https://cntrl.ai">CNTRL.ai</a> :rocket:</h3>
 
-- #### [@gluebag](https://github.com/gluebag)
-- #### [@haitestucodes](https://github.com/haitestucodes)
-###
-> ##  :rocket:  **New developments @ [CNTRL.ai](https://cntrl.ai)** :rocket:
-
->#### Connect with us on Social Media 
->[![Twitter](https://img.icons8.com/color/48/000000/twitter--v1.png)](https://twitter.com/CNTRLAI) 
->[![Instagram](https://img.icons8.com/color/48/000000/instagram-new--v1.png)](https://www.instagram.com/cntrl.ai/) 
->[![YouTube](https://img.icons8.com/color/48/000000/youtube-play.png)](https://www.youtube.com/@CNTRLai) 
->[![TikTok](https://img.icons8.com/color/48/000000/tiktok.png)](https://www.tiktok.com/@cntrl.ai) 
->[![Facebook](https://img.icons8.com/color/48/000000/facebook.png)](https://facebook.com/cntrl.ai) 
+<h3 align="center">Connect With us on Telegram</h3>
+<p align="center">
+  <a href="https://t.me/cntrlai">
+    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/Telegram_logo.svg/32px-Telegram_logo.svg.png" alt="Telegram">
+  </a>
+</p>
