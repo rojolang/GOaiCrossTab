@@ -52,8 +52,10 @@ var gptLimiter = rate.NewLimiter(rate.Every(time.Minute/10), 10)
 var gptSemaphore = make(chan struct{}, 10)
 var sheetsSemaphore = make(chan struct{}, 29)
 var cellMutexes map[string]*sync.Mutex
-
 var spreadsheetID string
+var errorCount int
+
+var stats map[string]interface{} // Define global variable for stats
 
 // setupEnvironment function loads environment variables, creates the Google Sheets and Redis services,
 // and returns the context, Redis client, and Sheets service.
@@ -131,6 +133,25 @@ func setupEnvironment() error {
 	return nil
 }
 
+// handleError function increments the "Errors" counter and updates the "Errors" and "Last Error" stats.
+func handleError(err error) {
+	// Increment the "Errors" counter
+	errorCount++
+
+	// If STATS is true, update the "Errors" and "Last Error" stats
+	if statsEnabled, ok := allSettings["GLOBAL"]["STATS"].(bool); ok && statsEnabled {
+		// Assume su is an instance of StatsUpdater from the stats.go file
+		err := su.UpdateStats("Errors", errorCount)
+		if err != nil {
+			log.Printf("Error updating stats: %v", err)
+		}
+
+		err = su.UpdateStats("Last Error", err.Error())
+		if err != nil {
+			log.Printf("Error updating stats: %v", err)
+		}
+	}
+}
 func readSettings() error {
 	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "Settings!A1:B1000").Do()
 	if err != nil {
@@ -178,6 +199,12 @@ func readSettings() error {
 					sheetsLimiter = rate.NewLimiter(rate.Every(time.Minute/time.Duration(s)), s)
 				} else {
 					log.Printf("Error: SHEETS_RATE_LIMIT is not an int. It is a %s", value)
+				}
+			case "STATS":
+				if s, err := strconv.ParseBool(value.(string)); err == nil {
+					allSettings["GLOBAL"]["STATS"] = s
+				} else {
+					log.Printf("Error: STATS is not a bool. It is a %s", value)
 				}
 			default:
 				allSettings["GLOBAL"][key] = value
@@ -448,6 +475,16 @@ func runGptSettingsOnRow(row map[string]interface{}, gptSettings ChunkSettings) 
 	}
 	updateSheetWithSemaphore(spreadsheetID, destinationRange, vr)
 	log.Printf("Updated row #%v (%s) with value %s\n", rowIndex, destinationColumnName, output)
+	// If STATS is true, update the "Successful Completions" stat
+	if statsEnabled, ok := allSettings["GLOBAL"]["STATS"].(bool); ok && statsEnabled {
+		// Assume su is an instance of StatsUpdater from the stats.go file
+		// Assume successfulCompletions is a counter for the number of successful completions
+		successfulCompletions++
+		err := su.UpdateStats("Successful Completions", successfulCompletions)
+		if err != nil {
+			log.Printf("Error updating stats: %v", err)
+		}
+	}
 
 	return nil
 }
@@ -558,6 +595,9 @@ func runMainLoop() error {
 	lastColumnCheck := time.Now().Add(-1 * time.Hour)
 	lastReadSettings := time.Now().Add(-1 * time.Hour)
 
+	// Define a counter for the total number of rows processed
+	totalRowsProcessed := 0
+
 	if prevState == nil {
 		prevState = make([][]interface{}, 0)
 	}
@@ -576,6 +616,18 @@ func runMainLoop() error {
 		if err != nil {
 			log.Printf("Error getting sheet values: %v", err)
 			continue
+		}
+
+		// Increment the total number of rows processed by the number of rows
+		totalRowsProcessed += len(resp.Values)
+
+		// If STATS is true, update the "Total Rows Processed" stat
+		if statsEnabled, ok := allSettings["GLOBAL"]["STATS"].(bool); ok && statsEnabled {
+			// Assume su is an instance of StatsUpdater from the stats.go file
+			err := su.UpdateStats("Total Rows Processed", totalRowsProcessed)
+			if err != nil {
+				log.Printf("Error updating stats: %v", err)
+			}
 		}
 
 		if prevState == nil {
@@ -610,14 +662,14 @@ func runMainLoop() error {
 
 		err = detectChanges(resp.Values, shouldCheckForNewColumns)
 		if err != nil {
-			log.Printf("Error detecting changes: %v", err)
+			handleError(err) // Call handleError function instead of logging the error directly
 			continue
 		}
 		prevState = resp.Values
 
 		sleepFreq, ok := allSettings["GLOBAL"]["SHEET_REFRESH_FREQUENCY"].(float64)
 		if !ok {
-			log.Printf("Error: SHEET_REFRESH_FREQUENCY in allSettings is not a float value")
+			handleError(fmt.Errorf("Error: SHEET_REFRESH_FREQUENCY in allSettings is not a float value")) // Call handleError function instead of logging the error directly
 			continue
 		}
 		time.Sleep(time.Duration(sleepFreq * float64(time.Second)))
