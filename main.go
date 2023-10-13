@@ -1,15 +1,14 @@
 package main
 
 import (
-	"GOaiCrossTab/stats"
 	"context"
 	"encoding/base64"
 	"fmt"
 	"github.com/cenkalti/backoff"
 	"github.com/go-redis/redis"
 	"github.com/joho/godotenv"
+	"github.com/rojolang/GOaiCrossTab/stats"
 	"github.com/sashabaranov/go-openai"
-	"github/rojolang/stats"
 	"golang.org/x/oauth2/google"
 	"golang.org/x/time/rate"
 	"google.golang.org/api/option"
@@ -56,6 +55,7 @@ var sheetsSemaphore = make(chan struct{}, 29)
 var cellMutexes map[string]*sync.Mutex
 var spreadsheetID string
 var errorCount int
+var successfulCompletions int
 
 var su *stats.StatsUpdater // Define global variable for stats updater
 
@@ -97,6 +97,13 @@ func setupEnvironment() error {
 		return nil
 	}
 	srv = tmpSrv
+
+	// Create new StatsUpdater
+	su, err = stats.NewStatsUpdater(spreadsheetID, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+	if err != nil {
+		handleError(err) // Call handleError function instead of returning the error directly
+		return nil
+	}
 
 	// Get Redis configuration from environment variables
 	redisAddr := os.Getenv("REDIS_ADDR")
@@ -650,7 +657,7 @@ func runMainLoop() error {
 				for j := range resp.Values[i] {
 					value, ok := resp.Values[i][j].(string)
 					if !ok {
-						handleError(fmt.Errorf("Error: value is not a string. It is a %T", resp.Values[i][j])) // Call handleError function instead of logging the error directly
+						handleError(fmt.Errorf("error: value is not a string. It is a %T", resp.Values[i][j])) // Call handleError function instead of logging the error directly
 						continue
 					}
 					err := redisClient.Set(fmt.Sprintf("cell:%d:%d", i, j), value, 0).Err()
@@ -667,7 +674,7 @@ func runMainLoop() error {
 		shouldCheckForNewColumns := false
 		newColumnsFreq, ok := allSettings["GLOBAL"]["SHEET_NEW_COLUMNS_FREQUENCY"].(float64)
 		if !ok {
-			handleError(fmt.Errorf("Error: SHEET_NEW_COLUMNS_FREQUENCY in allSettings is not a float value")) // Call handleError function instead of logging the error directly
+			handleError(fmt.Errorf("error: SHEET_NEW_COLUMNS_FREQUENCY in allSettings is not a float value")) // Call handleError function instead of logging the error directly
 			continue
 		}
 		if time.Since(lastColumnCheck).Seconds() >= newColumnsFreq {
@@ -684,7 +691,7 @@ func runMainLoop() error {
 
 		sleepFreq, ok := allSettings["GLOBAL"]["SHEET_REFRESH_FREQUENCY"].(float64)
 		if !ok {
-			handleError(fmt.Errorf("Error: SHEET_REFRESH_FREQUENCY in allSettings is not a float value")) // Call handleError function instead of logging the error directly
+			handleError(fmt.Errorf("error: SHEET_REFRESH_FREQUENCY in allSettings is not a float value")) // Call handleError function instead of logging the error directly
 			continue
 		}
 		time.Sleep(time.Duration(sleepFreq * float64(time.Second)))

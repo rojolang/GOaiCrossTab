@@ -1,4 +1,4 @@
-module GOaiCrossTab
+module github.com/rojolang/GOaiCrossTab
 
 go 1.21.2
 

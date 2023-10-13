@@ -12,6 +12,7 @@ import (
 type StatsUpdater struct {
 	srv           *sheets.Service
 	spreadsheetID string
+	statRowMap    map[string]int
 }
 
 func NewStatsUpdater(spreadsheetID string, serviceAccountKey string) (*StatsUpdater, error) {
@@ -70,6 +71,7 @@ func (su *StatsUpdater) CreateStatsSheet() error {
 
 func (su *StatsUpdater) WriteStatNames(statNames []string) error {
 	for i, stat := range statNames {
+		su.statRowMap[stat] = i + 1
 		range_ := fmt.Sprintf("Stats!A%d", i+1)
 		vr := &sheets.ValueRange{
 			Values: [][]interface{}{{stat}},
@@ -84,7 +86,11 @@ func (su *StatsUpdater) WriteStatNames(statNames []string) error {
 }
 
 func (su *StatsUpdater) UpdateStats(statName string, value interface{}) error {
-	range_ := fmt.Sprintf("Stats!B%d", statName)
+	row, ok := su.statRowMap[statName]
+	if !ok {
+		return fmt.Errorf("unknown stat: %s", statName)
+	}
+	range_ := fmt.Sprintf("Stats!B%d", row)
 	vr := &sheets.ValueRange{
 		Values: [][]interface{}{{value}},
 	}
