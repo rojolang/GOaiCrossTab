@@ -1,6 +1,7 @@
 package main
 
 import (
+	"GOaiCrossTab/stats"
 	"context"
 	"encoding/base64"
 	"fmt"
@@ -8,6 +9,7 @@ import (
 	"github.com/go-redis/redis"
 	"github.com/joho/godotenv"
 	"github.com/sashabaranov/go-openai"
+	"github/rojolang/stats"
 	"golang.org/x/oauth2/google"
 	"golang.org/x/time/rate"
 	"google.golang.org/api/option"
@@ -55,17 +57,20 @@ var cellMutexes map[string]*sync.Mutex
 var spreadsheetID string
 var errorCount int
 
-var stats map[string]interface{} // Define global variable for stats
+var su *stats.StatsUpdater // Define global variable for stats updater
 
-// setupEnvironment function loads environment variables, creates the Google Sheets and Redis services,
-// and returns the context, Redis client, and Sheets service.
-// It also initializes a map of mutexes for each cell in the Google Sheets.
-// It returns an error if an error occurred.
+// setupEnvironment loads environment variables, creates the Google Sheets and Redis services,
+// and initializes a map of mutexes for each cell in the Google Sheets.
+// It also creates a stats updater, creates the "Stats" sheet, and writes the stat names.
+// It handles any errors that occur during these operations by calling the handleError function,
+// which increments the "Errors" counter and updates the "Errors" and "Last Error" stats.
+// It returns an error if an error occurred while creating the mutexes.
 func setupEnvironment() error {
 	// Load environment variables
 	err := godotenv.Load()
 	if err != nil {
-		return fmt.Errorf("error loading .env file: %v", err)
+		handleError(err) // Call handleError function instead of returning the error directly
+		return nil
 	}
 
 	// Get spreadsheet ID from environment variable
@@ -74,19 +79,22 @@ func setupEnvironment() error {
 	// Decode service account key
 	b, err := base64.StdEncoding.DecodeString(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
 	if err != nil {
-		return fmt.Errorf("error decoding service account key: %v", err)
+		handleError(err) // Call handleError function instead of returning the error directly
+		return nil
 	}
 
 	// Create JWT config from service account key
 	conf, err := google.JWTConfigFromJSON(b, "https://www.googleapis.com/auth/spreadsheets")
 	if err != nil {
-		return fmt.Errorf("error parsing service account key: %v", err)
+		handleError(err) // Call handleError function instead of returning the error directly
+		return nil
 	}
 
 	// Create new Sheets service
 	tmpSrv, err := sheets.NewService(context.Background(), option.WithHTTPClient(conf.Client(context.Background())))
 	if err != nil {
-		return fmt.Errorf("error creating new Sheets service: %v", err)
+		handleError(err) // Call handleError function instead of returning the error directly
+		return nil
 	}
 	srv = tmpSrv
 
@@ -95,7 +103,8 @@ func setupEnvironment() error {
 	redisPassword := os.Getenv("REDIS_PASSWORD")
 	redisDB, err := strconv.Atoi(os.Getenv("REDIS_DB"))
 	if err != nil {
-		return fmt.Errorf("error parsing REDIS_DB: %v", err)
+		handleError(err) // Call handleError function instead of returning the error directly
+		return nil
 	}
 
 	// Create new Redis client
@@ -108,13 +117,15 @@ func setupEnvironment() error {
 	// Test Redis connection
 	_, err = redisClient.Ping().Result()
 	if err != nil {
-		return fmt.Errorf("error connecting to Redis: %v", err)
+		handleError(err) // Call handleError function instead of returning the error directly
+		return nil
 	}
 
 	// Fetch the entire sheet's data
 	resp, err := srv.Spreadsheets.Get(spreadsheetID).Do()
 	if err != nil {
-		return fmt.Errorf("error getting sheet data: %v", err)
+		handleError(err) // Call handleError function instead of returning the error directly
+		return nil
 	}
 
 	// Get the number of rows and columns from the sheet's grid data
@@ -134,6 +145,7 @@ func setupEnvironment() error {
 }
 
 // handleError function increments the "Errors" counter and updates the "Errors" and "Last Error" stats.
+// handleError function increments the "Errors" counter and updates the "Errors" and "Last Error" stats.
 func handleError(err error) {
 	// Increment the "Errors" counter
 	errorCount++
@@ -141,17 +153,18 @@ func handleError(err error) {
 	// If STATS is true, update the "Errors" and "Last Error" stats
 	if statsEnabled, ok := allSettings["GLOBAL"]["STATS"].(bool); ok && statsEnabled {
 		// Assume su is an instance of StatsUpdater from the stats.go file
-		err := su.UpdateStats("Errors", errorCount)
-		if err != nil {
-			log.Printf("Error updating stats: %v", err)
+		errUpdate := su.UpdateStats("Errors", errorCount)
+		if errUpdate != nil {
+			log.Printf("Error updating stats: %v", errUpdate)
 		}
 
-		err = su.UpdateStats("Last Error", err.Error())
-		if err != nil {
-			log.Printf("Error updating stats: %v", err)
+		errUpdate = su.UpdateStats("Last Error", err.Error())
+		if errUpdate != nil {
+			log.Printf("Error updating stats: %v", errUpdate)
 		}
 	}
 }
+
 func readSettings() error {
 	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "Settings!A1:B1000").Do()
 	if err != nil {
@@ -588,9 +601,12 @@ func columnLetterToIndex(columnLetter string) int {
 	return columnIndex - 1 // adjust to 0-indexed
 }
 
-// runMainLoop function runs the main loop of the program.
-// It fetches the values from the Google Sheet, detects any changes, and updates the previous state.
-// It sleeps for the specified refresh frequency before fetching the values again.
+// runMainLoop runs the main loop of the program. It fetches the values from the Google Sheet,
+// detects any changes, updates the previous state, and sleeps for the specified refresh frequency
+// before fetching the values again. It also updates the "Total Rows Processed" stat if the STATS setting is true.
+// It handles any errors that occur during these operations by calling the handleError function,
+// which increments the "Errors" counter and updates the "Errors" and "Last Error" stats.
+// It returns an error if an error occurred while sleeping.
 func runMainLoop() error {
 	lastColumnCheck := time.Now().Add(-1 * time.Hour)
 	lastReadSettings := time.Now().Add(-1 * time.Hour)
@@ -614,7 +630,7 @@ func runMainLoop() error {
 
 		resp, err := getSheetValuesWithSemaphore(spreadsheetID, allSettings["GLOBAL"]["SHEET_NAME"].(string))
 		if err != nil {
-			log.Printf("Error getting sheet values: %v", err)
+			handleError(err) // Call handleError function instead of logging the error directly
 			continue
 		}
 
@@ -623,10 +639,9 @@ func runMainLoop() error {
 
 		// If STATS is true, update the "Total Rows Processed" stat
 		if statsEnabled, ok := allSettings["GLOBAL"]["STATS"].(bool); ok && statsEnabled {
-			// Assume su is an instance of StatsUpdater from the stats.go file
 			err := su.UpdateStats("Total Rows Processed", totalRowsProcessed)
 			if err != nil {
-				log.Printf("Error updating stats: %v", err)
+				handleError(err) // Call handleError function instead of logging the error directly
 			}
 		}
 
@@ -635,12 +650,12 @@ func runMainLoop() error {
 				for j := range resp.Values[i] {
 					value, ok := resp.Values[i][j].(string)
 					if !ok {
-						log.Printf("Error: value is not a string. It is a %T", resp.Values[i][j])
+						handleError(fmt.Errorf("Error: value is not a string. It is a %T", resp.Values[i][j])) // Call handleError function instead of logging the error directly
 						continue
 					}
 					err := redisClient.Set(fmt.Sprintf("cell:%d:%d", i, j), value, 0).Err()
 					if err != nil {
-						log.Printf("Error setting value in Redis: %v", err)
+						handleError(err) // Call handleError function instead of logging the error directly
 						continue
 					}
 				}
@@ -652,7 +667,7 @@ func runMainLoop() error {
 		shouldCheckForNewColumns := false
 		newColumnsFreq, ok := allSettings["GLOBAL"]["SHEET_NEW_COLUMNS_FREQUENCY"].(float64)
 		if !ok {
-			log.Printf("Error: SHEET_NEW_COLUMNS_FREQUENCY in allSettings is not a float value")
+			handleError(fmt.Errorf("Error: SHEET_NEW_COLUMNS_FREQUENCY in allSettings is not a float value")) // Call handleError function instead of logging the error directly
 			continue
 		}
 		if time.Since(lastColumnCheck).Seconds() >= newColumnsFreq {
@@ -677,7 +692,6 @@ func runMainLoop() error {
 	return nil
 }
 
-// getSheetValuesWithSemaphore is a wrapper function for srv.Spreadsheets.Values.Get that uses a semaphore for rate limiting.
 // getSheetValuesWithSemaphore is a wrapper function for srv.Spreadsheets.Values.Get that uses a semaphore for rate limiting.
 func getSheetValuesWithSemaphore(spreadsheetID, sheetName string) (*sheets.ValueRange, error) {
 	sheetsSemaphore <- struct{}{}
