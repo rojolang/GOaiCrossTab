@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"github.com/cenkalti/backoff"
 	"github.com/go-redis/redis"
 	"github.com/joho/godotenv"
 	"github.com/rojolang/GOaiCrossTab/stats"
@@ -15,7 +14,6 @@ import (
 	"google.golang.org/api/sheets/v4"
 	"log"
 	"os"
-	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,10 +51,12 @@ var gptLimiter = rate.NewLimiter(rate.Every(time.Minute/10), 10)
 var gptSemaphore = make(chan struct{}, 10)
 var sheetsSemaphore = make(chan struct{}, 29)
 var cellMutexes map[string]*sync.Mutex
+var cellMutexesMutex = &sync.Mutex{} // Mutex to protect access to cellMutexes map
 var spreadsheetID string
 var errorCount int
 var successfulCompletions int
 var lastError string
+var wg sync.WaitGroup // WaitGroup to ensure all goroutines finish
 
 var su *stats.StatsUpdater // Define global variable for stats updater
 
@@ -175,8 +175,10 @@ func handleError(err error) {
 	}
 }
 
+// readSettings reads settings from the Google Sheet and updates the global settings variables.
+// It returns an error if an error occurred while reading the settings.
 func readSettings() error {
-	resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, "Settings!A1:B1000").Do()
+	resp, err := readFromSheetWithRateLimit(spreadsheetID, "Settings!A1:B1000")
 	if err != nil {
 		return fmt.Errorf("unable to retrieve data from sheet: %v", err)
 	}
@@ -434,10 +436,9 @@ func replaceTokens(message string, currentRow map[string]interface{}) string {
 	return message
 }
 
-// Mutex for synchronizing access to critical sections of code
-
 // runGptSettingsOnRow processes the GPT settings on a row.
-// It fetches the GPT response, updates the Google Sheet with the response, and logs any errors.
+// It fetches the GPT response,
+// updates the Google Sheet with the response using rate-limited function, and logs any errors.
 // It returns an error if an error occurred.
 func runGptSettingsOnRow(row map[string]interface{}, gptSettings ChunkSettings) error {
 	if err := gptLimiter.Wait(context.Background()); err != nil {
@@ -457,7 +458,11 @@ func runGptSettingsOnRow(row map[string]interface{}, gptSettings ChunkSettings) 
 	vr := &sheets.ValueRange{
 		Values: [][]interface{}{{""}},
 	}
-	updateSheetWithSemaphore(spreadsheetID, destinationRange, vr)
+	_, err := writeToSheetWithRateLimit(spreadsheetID, destinationRange, vr)
+	if err != nil {
+		log.Printf("Error updating Google Sheet: %v", err)
+		return err
+	}
 
 	systemMessage := replaceTokens(gptSettings.SystemMessage, row)
 	userMessage := replaceTokens(gptSettings.UserMessage, row)
@@ -496,12 +501,16 @@ func runGptSettingsOnRow(row map[string]interface{}, gptSettings ChunkSettings) 
 	vr = &sheets.ValueRange{
 		Values: [][]interface{}{{output}},
 	}
-	updateSheetWithSemaphore(spreadsheetID, destinationRange, vr)
+	_, err = writeToSheetWithRateLimit(spreadsheetID, destinationRange, vr)
+	if err != nil {
+		log.Printf("Error updating Google Sheet: %v", err)
+		return err
+	}
 	log.Printf("Updated row #%v (%s) with value %s\n", rowIndex, destinationColumnName, output)
-	// If STATS is true, update the "Successful Completions" stat
+	// If the STATS are true, update the "Successful Completions" stat
 	if statsEnabled, ok := allSettings["GLOBAL"]["STATS"].(bool); ok && statsEnabled {
 		// Assume su is an instance of StatsUpdater from the stats.go file
-		// Assume successfulCompletions is a counter for the number of successful completions
+		// Assumes successfulCompletions is a counter for the number of successful completions
 		successfulCompletions++
 		err := su.UpdateStats("Successful Completions", successfulCompletions)
 		if err != nil {
@@ -522,14 +531,18 @@ func runGptSettingsOnRow(row map[string]interface{}, gptSettings ChunkSettings) 
 // Finally, it releases the token back to the gptSemaphore.
 func runGptSettingsOnRowWithSemaphore(row map[string]interface{}, gptSettings ChunkSettings) error {
 	gptSemaphore <- struct{}{}
+	wg.Add(1) // Increment WaitGroup counter
 	go func() {
+		defer wg.Done() // Decrement WaitGroup counter when goroutine finishes
 		defer func() { <-gptSemaphore }()
+		cellMutexesMutex.Lock()
 		cellKey := fmt.Sprintf("%d:%d", row["RowIndex"], columnIndexByName[gptSettings.PromptColTo])
 		mutex, ok := cellMutexes[cellKey]
 		if !ok {
 			mutex = &sync.Mutex{}
 			cellMutexes[cellKey] = mutex
 		}
+		cellMutexesMutex.Unlock()
 		mutex.Lock()
 		err := runGptSettingsOnRow(row, gptSettings)
 		mutex.Unlock()
@@ -540,75 +553,28 @@ func runGptSettingsOnRowWithSemaphore(row map[string]interface{}, gptSettings Ch
 	return nil
 }
 
-// updateSheetWithSemaphore is a function that updates a Google Sheet with a semaphore for rate limiting.
-// It first acquires a token from the sheetsSemaphore, then launches a goroutine to update the Google Sheet.
-// The goroutine first checks if a mutex exists for the cell. If it doesn't, it creates a new mutex and stores it in the map.
-// It then locks the mutex for the cell to ensure exclusive access to the cell.
-// It then calls the srv.Spreadsheets.Values.Update function to update the Google Sheet.
-// If the destination range is invalid, it adds a new row or column to the cellMutexes map.
-// After the Google Sheet has been updated, it unlocks the mutex for the cell to allow other goroutines to access the cell.
-// If an error occurs while updating the Google Sheet, it logs the error.
-// Finally, it releases the token back to the sheetsSemaphore.
-func updateSheetWithSemaphore(spreadsheetID, destinationRange string, vr *sheets.ValueRange) {
-	sheetsSemaphore <- struct{}{}
-	go func() {
-		defer func() { <-sheetsSemaphore }()
+// readFromSheetWithRateLimit waits for a token from the rate limiter, then reads values from a Google Sheet.
+// It returns the values read and any error encountered.
+func readFromSheetWithRateLimit(spreadsheetID, range_ string) (*sheets.ValueRange, error) {
+	// Wait for a token from the rate limiter
+	if err := sheetsLimiter.Wait(context.Background()); err != nil {
+		return nil, err
+	}
 
-		// Parse the rowIndex and columnIndex from the destinationRange
-		reg := regexp.MustCompile(`([A-Za-z]+)([0-9]+)`)
-		matches := reg.FindStringSubmatch(destinationRange)
-		if len(matches) < 3 {
-			log.Printf("Invalid destination range: %s. Skipping update.", destinationRange)
-			return
-		}
-
-		// Convert column letter to index
-		columnIndex := columnLetterToIndex(matches[1])
-		rowIndex, err := strconv.Atoi(matches[2])
-		if err != nil {
-			log.Printf("Error parsing rowIndex: %v", err)
-			return
-		}
-		rowIndex-- // adjust to 0-indexed
-
-		cellKey := fmt.Sprintf("%d:%d", rowIndex, columnIndex)
-		mutex, ok := cellMutexes[cellKey]
-		if !ok {
-			mutex = &sync.Mutex{}
-			cellMutexes[cellKey] = mutex
-		}
-		mutex.Lock()
-		operation := func() error {
-			err := sheetsLimiter.Wait(context.Background())
-			if err != nil {
-				log.Printf("[Sheets] rate limit error: %v", err)
-				return err
-			}
-			_, err = srv.Spreadsheets.Values.Update(spreadsheetID, destinationRange, vr).ValueInputOption("USER_ENTERED").Do()
-			if err != nil {
-				log.Printf("Error updating Google Sheet: %v", err)
-				return err
-			}
-			return nil
-		}
-		expBackOff := backoff.NewExponentialBackOff()
-		err = backoff.Retry(operation, expBackOff)
-		mutex.Unlock()
-		if err != nil {
-			return
-		}
-	}()
+	// Proceed with the read operation
+	return srv.Spreadsheets.Values.Get(spreadsheetID, range_).Do()
 }
 
-// columnLetterToIndex converts a column letter to an index.
-func columnLetterToIndex(columnLetter string) int {
-	columnIndex := 0
-	multiplier := 1
-	for i := len(columnLetter) - 1; i >= 0; i-- {
-		columnIndex += int(columnLetter[i]-'A'+1) * multiplier
-		multiplier *= 26
+// writeToSheetWithRateLimit waits for a token from the rate limiter, then writes values to a Google Sheet.
+// It returns the response from the write operation and any error encountered.
+func writeToSheetWithRateLimit(spreadsheetID, range_ string, vr *sheets.ValueRange) (*sheets.UpdateValuesResponse, error) {
+	// Wait for a token from the rate limiter
+	if err := sheetsLimiter.Wait(context.Background()); err != nil {
+		return nil, err
 	}
-	return columnIndex - 1 // adjust to 0-indexed
+
+	// Proceed with the write operation
+	return srv.Spreadsheets.Values.Update(spreadsheetID, range_, vr).ValueInputOption("USER_ENTERED").Do()
 }
 
 // runMainLoop runs the main loop of the program. It fetches the values from the Google Sheet,
@@ -624,9 +590,8 @@ func runMainLoop() error {
 	// Define a counter for the total number of rows processed
 	totalRowsProcessed := 0
 
-	if prevState == nil {
-		prevState = make([][]interface{}, 0)
-	}
+	// Initialize prevState as nil
+	var prevState [][]interface{} = nil
 
 	for {
 		if time.Since(lastReadSettings).Seconds() >= 15 {
@@ -655,6 +620,7 @@ func runMainLoop() error {
 			}
 		}
 
+		// If prevState is nil, write the initial state to Redis
 		if prevState == nil {
 			for i := range resp.Values {
 				for j := range resp.Values[i] {
@@ -702,14 +668,17 @@ func runMainLoop() error {
 	return nil
 }
 
-// getSheetValuesWithSemaphore is a wrapper function for srv.Spreadsheets.Values.Get that uses a semaphore for rate limiting.
+// getSheetValuesWithSemaphore is a wrapper function for readFromSheetWithRateLimit
+// that uses a semaphore for rate limiting.
 func getSheetValuesWithSemaphore(spreadsheetID, sheetName string) (*sheets.ValueRange, error) {
 	sheetsSemaphore <- struct{}{}
 	respCh := make(chan *sheets.ValueRange, 1)
 	errCh := make(chan error, 1)
+	wg.Add(1) // Increment WaitGroup counter
 	go func() {
+		defer wg.Done() // Decrement WaitGroup counter when goroutine finishes
 		defer func() { <-sheetsSemaphore }()
-		resp, err := srv.Spreadsheets.Values.Get(spreadsheetID, sheetName).Do()
+		resp, err := readFromSheetWithRateLimit(spreadsheetID, sheetName)
 		if err != nil {
 			errCh <- fmt.Errorf("error getting sheet values: %v", err)
 			return
@@ -744,4 +713,5 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error running main loop: %v", err)
 	}
+	wg.Wait() // Wait for all goroutines to finish before exiting
 }
