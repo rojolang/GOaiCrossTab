@@ -56,6 +56,7 @@ var cellMutexes map[string]*sync.Mutex
 var spreadsheetID string
 var errorCount int
 var successfulCompletions int
+var lastError string
 
 var su *stats.StatsUpdater // Define global variable for stats updater
 
@@ -99,7 +100,7 @@ func setupEnvironment() error {
 	srv = tmpSrv
 
 	// Create new StatsUpdater
-	su, err = stats.NewStatsUpdater(spreadsheetID, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+	su, err = stats.NewStatsUpdater(spreadsheetID, os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"), []string{"Total Rows Processed", "Errors", "Successful Completions", "Last Error"})
 	if err != nil {
 		handleError(err) // Call handleError function instead of returning the error directly
 		return nil
@@ -152,10 +153,12 @@ func setupEnvironment() error {
 }
 
 // handleError function increments the "Errors" counter and updates the "Errors" and "Last Error" stats.
-// handleError function increments the "Errors" counter and updates the "Errors" and "Last Error" stats.
 func handleError(err error) {
 	// Increment the "Errors" counter
 	errorCount++
+
+	// Set the last error
+	lastError = err.Error()
 
 	// If STATS is true, update the "Errors" and "Last Error" stats
 	if statsEnabled, ok := allSettings["GLOBAL"]["STATS"].(bool); ok && statsEnabled {
@@ -165,7 +168,7 @@ func handleError(err error) {
 			log.Printf("Error updating stats: %v", errUpdate)
 		}
 
-		errUpdate = su.UpdateStats("Last Error", err.Error())
+		errUpdate = su.UpdateStats("Last Error", lastError)
 		if errUpdate != nil {
 			log.Printf("Error updating stats: %v", errUpdate)
 		}
@@ -728,7 +731,6 @@ func getSheetValuesWithSemaphore(spreadsheetID, sheetName string) (*sheets.Value
 // fetches the settings from the Google Sheet, stores the prompt settings,
 // and runs the main loop of the program.
 func main() {
-
 	err := setupEnvironment()
 	if err != nil {
 		log.Fatalf("Error setting up environment: %v", err)
