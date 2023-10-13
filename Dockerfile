@@ -1,6 +1,8 @@
+# Start from the latest golang base image
 FROM golang:latest
 
-LABEL authors="rojo"
+# Add Maintainer Info
+LABEL maintainer="admin@cntrl.ai"
 
 # Set the Current Working Directory inside the container
 WORKDIR /app

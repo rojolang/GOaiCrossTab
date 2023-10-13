@@ -1,0 +1,25 @@
+version: '3'
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - .:/go/src/app
+    ports:
+      - "8080:8080"
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS
+      - OPENAI_SECRET_KEY
+      - SPREADSHEET_ID
+      - REDIS_PASSWORD
+      - REDIS_ADDR
+      - REDIS_DB
+    depends_on:
+      - redis
+  redis:
+    image: "redis:alpine"
+    environment:
+      - REDIS_PASSWORD
+    ports:
+      - "6379:6379"
